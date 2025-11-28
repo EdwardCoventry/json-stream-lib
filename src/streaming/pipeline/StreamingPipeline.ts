@@ -21,6 +21,7 @@ export interface PipelineOptions {
   maxFrames: number;
   maxBytes: number;
   abortSignal?: AbortSignal;
+  fetcher?: typeof fetch;
   onDone?: (final: any) => void;
   onDeltaText?: (delta: string, fullText: string) => void;
   qr?: any; // Optional query response object
@@ -69,7 +70,8 @@ export async function runStreamingPipeline(opts: PipelineOptions) {
     };
 
     try {
-      const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json', Accept:'text/event-stream'}, body: JSON.stringify(payload), signal: ctl.signal});
+      const fetcher = opts.fetcher || fetch;
+      const r = await fetcher(url, {method:'POST', headers:{'Content-Type':'application/json', Accept:'text/event-stream'}, body: JSON.stringify(payload), signal: ctl.signal});
       if (!r.ok || !r.body) {
         const errText = await r.text().catch(()=> '');
         const statusNum = (r as any).status | 0;
