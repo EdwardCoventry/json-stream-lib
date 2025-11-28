@@ -16,3 +16,7 @@ pnpm-debug.log*
 
 # OS artifacts
 .DS_Store
+
+# Editor directories
+.vscode/
+.idea/
