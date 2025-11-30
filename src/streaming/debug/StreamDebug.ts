@@ -1,32 +1,66 @@
-type Logger = { info?: (...args: any[]) => void; warn?: (...args: any[]) => void; error?: (...args: any[]) => void; debug?: (...args: any[]) => void; log?: (...args: any[]) => void };
+import {JsonDeltaRetryPhase} from '../types.js';
+import {emitJsonDeltaDebugEvent, emitJsonDeltaErrorReport} from '../utils/eventBus.js';
+import {emitJsonDeltaRetryEvent} from '../utils/retry.js';
 
-/**
- * Lightweight debug emitter used by the streaming pipeline.
- * All methods are best-effort no-ops unless a logger is provided.
- */
-export class StreamDebug {
-  constructor(private uiSid: string = '', private logger?: Logger) {}
+type QueryResponseLike = {
+  pushHeaders?: (meta: any) => void;
+  markCompleted?: () => void;
+};
 
-  private emit(level: keyof Logger, message: string, payload?: any) {
-    const fn = this.logger?.[level] || this.logger?.log;
-    try { fn?.(message, payload); } catch {}
+export class JsonDeltaDebugLogger {
+  constructor(private readonly uiSid: string, private readonly qr?: QueryResponseLike) {}
+
+  private swallow(fn: () => void) {
+    try { fn(); } catch {}
   }
 
-  requestStart(_model: string, payload: any) { this.emit('info', '[stream] request.start', { sessionId: this.uiSid, payload }); }
-  headers(meta: {requestId?: string; model?: string; coldStart?: string; upstreamTTFBms?: string}) { this.emit('info', '[stream] response.headers', { ...meta, sessionId: this.uiSid }); }
-  error(status: number, bodySnippet: string, _willReport: boolean, model?: string, url?: string, payload?: any) {
-    this.emit('error', '[stream] response.error', { status, bodySnippet, sessionId: this.uiSid, model, url, payload })
+  requestStart(model: string, payload: any) {
+    this.swallow(() => emitJsonDeltaDebugEvent({
+      source: 'system',
+      type: 'request.start',
+      data: {api: 'responses', model, stream: true, payload, sessionId: this.uiSid},
+    }));
   }
-  textDelta(delta: string, fullText: string) { this.emit('debug', '[stream] text.delta', { delta, fullText, sessionId: this.uiSid }); }
-  jsonDelta(delta: string) { this.emit('debug', '[stream] json.delta', { delta, sessionId: this.uiSid }); }
-  sse(eventType: string) { this.emit('debug', '[stream] sse', { eventType, sessionId: this.uiSid }); }
-  sseSuppressed() { this.emit('debug', '[stream] sse.suppressed', { sessionId: this.uiSid }); }
-  perfSlice(data: any) { this.emit('debug', '[stream] perf.slice', { ...data, sessionId: this.uiSid }); }
-  perfSample(data: any) { this.emit('debug', '[stream] perf', { ...data, sessionId: this.uiSid }); }
-  parseSlow(ms: number) { this.emit('warn', '[stream] perf.parseSlow', { ms, sessionId: this.uiSid }); }
-  heartbeat(note: string) { this.emit('debug', '[stream] heartbeat', { note, sessionId: this.uiSid }); }
-  aborted() { this.emit('warn', '[stream] aborted', { sessionId: this.uiSid }); }
-  pipelineDiff(primaryLen: number, secondaryLen: number, sessionId: string) { this.emit('debug', '[stream] pipeline.diff', { primaryLen, secondaryLen, sessionId }); }
-  clearRetry() { /* noop */ }
-  static noop(): StreamDebug { return new StreamDebug('', undefined); }
+  headers(meta: {requestId: string; model: string; coldStart?: string; upstreamTTFBms?: string}) {
+    this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.headers', data: {...meta, sessionId: this.uiSid}}));
+    this.swallow(() => this.qr?.pushHeaders?.(meta as any));
+  }
+  error(status: number, bodySnippet: string, willUiReport: boolean, model?: string, url?: string, payload?: any) {
+    this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.error', data: {status, bodySnippet, sessionId: this.uiSid, uiReported: willUiReport}}));
+    if (willUiReport) {
+      this.swallow(() => emitJsonDeltaErrorReport({
+        source: 'stream',
+        context: 'stream.core',
+        name: 'StreamError',
+        message: `status ${status}`,
+        stack: '',
+        request: {url, model, payload, stream: true},
+        response: {status, bodySnippet, requestId: '', model: '', headers: {}},
+      }));
+    }
+  }
+  textDelta(delta: string, fullText: string) {
+    if (!delta) return;
+    this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.text.delta', data: {delta, fullText, sessionId: this.uiSid}}));
+  }
+  jsonDelta(delta: string) {
+    if (!delta) return;
+    this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.json.delta', data: {delta, sessionId: this.uiSid}}));
+  }
+  sse(eventType: string) {
+    if (!eventType) return;
+    this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.sse', data: {eventType, sessionId: this.uiSid}}));
+  }
+  sseSuppressed() { this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.sse.suppressed', data: {suppressed: true, sessionId: this.uiSid}})); }
+  perfSlice(data: any) { this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.perf.slice', data: {...data, sessionId: this.uiSid}})); }
+  perfSample(data: any) { this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.perf', data: {...data, sessionId: this.uiSid}})); }
+  parseSlow(ms: number) { this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.perf.parseSlow', data: {ms, sessionId: this.uiSid}})); }
+  heartbeat(note: string) { this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.heartbeat', data: {note, sessionId: this.uiSid}})); }
+  aborted() {
+    this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'response.aborted', data: {sessionId: this.uiSid}}));
+    this.swallow(() => this.qr?.markCompleted?.());
+  }
+  pipelineDiff(primaryLen: number, secondaryLen: number, sessionId: string) { this.swallow(() => emitJsonDeltaDebugEvent({source: 'system', type: 'pipeline.diff', data: {primaryLen, secondaryLen, sessionId}})); }
+  clearRetry() { this.swallow(() => emitJsonDeltaRetryEvent({phase: JsonDeltaRetryPhase.Clear})); }
+  static noop(): JsonDeltaDebugLogger { return new JsonDeltaDebugLogger('', undefined); }
 }

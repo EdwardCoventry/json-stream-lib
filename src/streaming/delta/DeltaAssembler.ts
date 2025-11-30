@@ -5,8 +5,15 @@ export interface ToolCallDelta {
   function?: { name?: string; arguments?: string };
 }
 
-export class DeltaAssembler {
-  finalMessage: any = { role: 'assistant', content: '' };
+type ToolCall = { id: string; type: string; function: { name: string; arguments: string } };
+export type AssistantMessage = { role: string; content: string; tool_calls?: ToolCall[] };
+
+/**
+ * Aggregates incremental deltas (text, JSON, tool calls) into a final assistant
+ * message payload while keeping a running `fullText` representation for debug.
+ */
+export class JsonDeltaAssembler {
+  private finalMessage: AssistantMessage = { role: 'assistant', content: '' };
   private _fullText = '';
 
   addText(t: string) {
@@ -46,5 +53,6 @@ export class DeltaAssembler {
   }
 
   fullText(): string { return this._fullText; }
-  final() { return this.finalMessage; }
+  get message(): AssistantMessage { return this.finalMessage; }
+  final(): AssistantMessage { return this.finalMessage; }
 }

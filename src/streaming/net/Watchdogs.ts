@@ -1,3 +1,7 @@
+/**
+ * Builds lightweight timers to abort a stream when no bytes arrive or when the
+ * stream stalls mid-flight.
+ */
 export function createWatchdogs(ttfbMs: number, stallMs: number, onAbort: () => void) {
   let ttfbTimer: any; let stallTimer: any; let seenBytes = false;
   const armTtfb = () => { clearTimeout(ttfbTimer); ttfbTimer = setTimeout(() => { if (!seenBytes) onAbort(); }, ttfbMs); };

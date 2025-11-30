@@ -1,56 +1,94 @@
-json-stream-lib
-Lightweight helpers for working with streamed AI responses:
-- StreamParser accumulates arbitrarily chunked text and emits parseable JSON snapshots as soon as they are valid.
-- Streaming utilities (SSE frame queue, delta assembler, retry/backoff, watchdogs) for wiring up text/JSON deltas from an AI backend. Used in the `what-kind-of-are-you` app to consume structured SSE responses.
+# json-stream-lib
 
-Install
-- `npm install @edwardcoventry/json-stream-lib` (or use the local workspace alias `@json-stream-lib` as in the app)
-- `npm run build` to emit CJS/ESM/d.ts into `dist/`
+Helpers for two streaming modes:
+- Structured JSON deltas for SSE-based Responses APIs.
+- Raw text streams you still want to treat as JSON.
 
-Incremental JSON parsing (StreamParser)
-The parser is resilient to any chunking; call `parse(chunk, isFinal)` for each string chunk. It yields `StreamParseResult` when something changed or when the stream completes.
-```ts
-import { StreamParser } from '@edwardcoventry/json-stream-lib';
-
-const parser = new StreamParser();
-const chunks = ['{"a":1', ',"b":', '2}'];
-
-for (const [i, chunk] of chunks.entries()) {
-  const res = parser.parse(chunk, i === chunks.length - 1);
-  if (!res) continue;
-
-  if (res.event === 'JSON_STARTED') console.log('started');
-  if (res.status === 'PARTIAL') console.log('partial', res.data);
-  if (res.status === 'COMPLETED') console.log('final', res.data); // -> {a:1, b:2}
-  console.log('forced closures used:', res.forced_closures);
-}
+## Install
+```bash
+npm install @edwardcoventry/json-stream-lib
 ```
+Requires Node 18+ (for the built-in `fetch`) or a browser environment.
 
-Streaming pipeline (SSE helpers)
-`runStreamingPipeline` posts a payload to an SSE endpoint, retries on transient failures, and stitches together text/JSON deltas. It expects event types such as `response.output_text.delta`, `response.output_json.delta`, `response.content_part.added`, and the `[DONE]` sentinel.
+## Choosing a path
+| Your SSE payloads look like… | Use this namespace |
+| --- | --- |
+| `response.output_json.delta` / `response.content_part.added` objects | `streaming/json-delta` (runJsonResponsesStream / runJsonDeltaPipeline) |
+| Plain text chunks that should resolve to JSON | `streaming/raw-json` (RawJsonStreamParser / runRawJsonStream) |
+
+## Structured JSON deltas (Responses API)
+Handles SSE events such as `response.output_json.delta`, `response.output_text.delta`, `response.content_part.added`, `response.output_item.done`, and `[DONE]`. Deltas are merged for you and exposed as both text and structured JSON slices.
 ```ts
-import { runStreamingPipeline, NetworkPolicy, StreamDebug } from '@edwardcoventry/json-stream-lib';
+import {
+  runJsonResponsesStream,
+  JsonDeltaDebugLogger,
+  NetworkPolicy,
+  QueryResponse,
+} from '@edwardcoventry/json-stream-lib/streaming/json-delta';
 
-const apiBase = 'https://your-api';
-const abort = new AbortController();
+const qr = new QueryResponse('ui-session-123', 'result', { listenToDom: false });
 
-await runStreamingPipeline({
-  url: `${apiBase}/api/responses`,
-  payload: { model: 'gpt-4', messages },
-  uiSid: 'ui-session-123',                 // for logging
-  isJsonStructured: true,                  // treat deltas as JSON strings instead of raw text
-  policy: NetworkPolicy.fromCurrent(),     // retry/backoff/timeouts
-  dbg: new StreamDebug('ui-session-123', console),
-  maxFrames: 256,
-  maxBytes: 2_000_000,
-  abortSignal: abort.signal,
-  onDeltaText: (delta, fullText) => console.log('delta', delta, 'full', fullText),
-  onDone: (final) => console.log('final assembled payload', final),
+await runJsonResponsesStream(
+  [{ role: 'user', content: 'Hello!' }],
+  'gpt-4.1',
+  {
+    onDeltaText: (delta, full) => console.log('delta', delta, 'full', full),
+    onDone: (final) => console.log('final assistant message', final),
+  },
+  {
+    text: { format: { type: 'json_schema', value: {/* schema */} } },
+    clientSessionId: 'ui-session-123',
+    qr,
+    policy: NetworkPolicy.fromCurrent(),
+    dbg: new JsonDeltaDebugLogger('ui-session-123', qr),
+  },
+);
+
+qr.onEvent((ev) => {
+  if (ev.type === 'json-partial') {
+    // Merge structured deltas as they arrive (response.output_json.delta payloads)
+    console.log('partial JSON', ev.data.value);
+  }
+  if (ev.type === 'json-completed') {
+    console.log('completed JSON object', ev.data.value);
+  }
 });
 ```
-You can pass a `qr` object shaped like `QueryResponse` from the app to receive lifecycle callbacks (`markHeaders`, `pushTextDelta`, `pushJsonDelta`, etc.).
+Need lower-level control? `runJsonDeltaPipeline` streams directly against a URL/payload pair while still routing `response.output_json.delta` via `routeJsonDeltaEvent`, throttling with `JsonDeltaThrottler`, and assembling text/tool calls with `JsonDeltaAssembler`.
+See `docs/structured-json-deltas.md` for a fuller walkthrough.
 
-Exports
-- Top-level: `StreamParser`, `JsonCloser`, `Status`, `StreamParseResult`
-- Streaming: `runStreamingPipeline`, `NetworkPolicy`, `StreamDebug`, `DeltaAssembler`, `DeltaThrottler`, `FrameQueue`, `SliceScheduler`, `createWatchdogs`, `parseSseFrame`, `routeParsedEvent`, retry types, and related helpers under `streaming/`.
+## Raw text to JSON (manual parsing)
+Use when the upstream only emits text (e.g., `response.output_text.delta`) and you still want incremental JSON.
+```ts
+import { runRawJsonStream } from '@edwardcoventry/json-stream-lib/streaming/raw-json';
 
+await runRawJsonStream({
+  source: ['{"a":1', ',"b":2', '}'],
+  onPartial: (value) => console.log('partial JSON', value),
+  onComplete: (value) => console.log('complete JSON', value),
+});
+```
+For manual control, `RawJsonStreamParser` exposes `parse(chunk, isFinal)` and emits `{status: 'PARTIAL' | 'COMPLETED', data, forcedClosures, event?: 'JSON_STARTED'}`. It auto-completes literal prefixes (`tr` → `true`, `fal` → `false`, `nu` → `null`) when they appear at value boundaries and still emits a change when a forced close is later replaced by a real brace/bracket. More in `docs/raw-text-to-json.md`.
+
+## Core primitives
+Reusable building blocks live under `streaming/core`: `NetworkPolicy`, `FrameQueue`, `SliceScheduler`, `RetryManager`, `createWatchdogs`, `parseSseFrame`, `runWithShadow`, `WatchdogManager`, retry enums, and related types.
+
+## Events and debug helpers
+`emitJsonDeltaDebugEvent`, `emitJsonDeltaErrorReport`, and `emitJsonDeltaRetryEvent` expose observable hooks (DOM CustomEvents) for logging, metrics, and UI reporting.
+
+## Examples and docs
+- Structured JSON deltas: `docs/structured-json-deltas.md`
+- Raw text to JSON: `docs/raw-text-to-json.md`
+- Quiz app (JSON deltas): `examples/quiz-app.md`
+- Status monitor (raw text stream): `examples/status-monitor.md`
+
+## Build and test
+```bash
+npm run build
+npm test
+```
+
+## Publish checklist
+- `npm test` (runs a fresh build and test suite)
+- `npm publish --access public`
+- Tag the release in git if you want changelog continuity

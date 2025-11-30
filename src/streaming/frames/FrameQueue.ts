@@ -1,3 +1,7 @@
+/**
+ * Simple bounded queue for SSE frames in the JSON-delta pipeline. Keeps memory
+ * under control by capping both frame count and accumulated byte size.
+ */
 export class FrameQueue {
   private frames: string[] = [];
   private readerFinished = false;
@@ -9,32 +13,42 @@ export class FrameQueue {
     this.drainPromise = new Promise<void>(res => { this.drainResolve = res; });
   }
 
+  private resolveDrainIfIdle() {
+    if (this.readerFinished && this.frames.length === 0 && this.drainResolve) this.drainResolve();
+  }
+
   push(frame: string) {
     if (!frame) return;
     const size = frame.length;
     this.totalBytes += size;
     if (this.frames.length >= this.maxFrames || this.totalBytes >= this.maxBytes) {
       // Drop oldest frame to keep memory bounded
-      this.frames.shift();
+      const removed = this.frames.shift();
+      if (removed) this.totalBytes -= removed.length;
     }
     this.frames.push(frame);
   }
-  shift(): string | undefined { return this.frames.shift(); }
+  shift(): string | undefined {
+    const frame = this.frames.shift();
+    if (frame) this.totalBytes -= frame.length;
+    return frame;
+  }
   length(): number { return this.frames.length; }
 
   markReaderFinished() {
     this.readerFinished = true;
-    if (this.readerFinished && this.frames.length === 0 && this.drainResolve) this.drainResolve();
+    this.resolveDrainIfIdle();
   }
 
   notifyFrameConsumed() {
-    if (this.readerFinished && this.frames.length === 0 && this.drainResolve) this.drainResolve();
+    this.resolveDrainIfIdle();
   }
 
   drain(): Promise<void> { return this.drainPromise; }
 
   abort() {
     this.frames.length = 0;
+    this.totalBytes = 0;
     if (this.drainResolve) this.drainResolve();
   }
 }

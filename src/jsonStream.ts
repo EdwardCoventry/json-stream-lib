@@ -1,286 +1,326 @@
 // A TypeScript port of the Python JSON stream builder.
 // It accumulates arbitrarily chunked text and yields partial JSON states as soon as they become parseable.
 
-export type Status = 'COMPLETED' | 'PARTIAL' | 'FAILED';
+export type RawJsonStatus = 'COMPLETED' | 'PARTIAL' | 'FAILED';
 
-const UNPASSABLE = Symbol('UNPASSABLE');
+const UNPARSABLE = Symbol('UNPARSABLE');
 
-class DoNotCloseJson extends Error {
-}
+class DoNotCloseJson extends Error {}
 
 type StackEntry = { char: '{' | '[' | '"'; pos: number };
 
-export class JsonCloser {
-    private buffer = '';
-    private stack: StackEntry[] = [];
-    private prevSize = 0;
-    private closedObject = false;
-    private closedArray = false;
-    private forcedClosures = 0;
-    private numericPattern = /-?\d+(\.\d*)?([eE][-+]?\d+)?$/;
+type ParsedState = {
+  hasChanged: boolean;
+  parsed: any | typeof UNPARSABLE;
+  stack: StackEntry[];
+  forcedClosures: number;
+};
 
-    // JSON start detection
-    private hasStarted = false;
-    private startEventPending = false;
+type ParseTuple = [hasChanged: boolean, parsed: any | typeof UNPARSABLE, stack: StackEntry[], forcedClosures: number];
 
-    /** Returns true exactly once, when the first JSON starter was seen. */
-    consumeStartEvent(): boolean {
-        if (this.startEventPending) {
-            this.startEventPending = false;
-            return true;
-        }
-        return false;
+/**
+ * Maintains an incremental snapshot of a JSON payload as arbitrary chunks arrive.
+ * The class keeps track of string/brace balance so callers can ask for the
+ * closest valid JSON slice at any moment.
+ */
+export class RawJsonCloser {
+  private buffer = '';
+  private stack: StackEntry[] = [];
+  private prevSerialized: string | null = null;
+  private lastClosure: 'object' | 'array' | null = null;
+  private forcedClosures = 0;
+  private readonly numericPattern = /-?\d+(\.\d*)?([eE][-+]?\d+)?$/;
+
+  // JSON start detection
+  private hasStarted = false;
+  private startEventPending = false;
+
+  /** Returns true exactly once, when the first JSON starter was seen. */
+  consumeStartEvent(): boolean {
+    if (!this.startEventPending) return false;
+    this.startEventPending = false;
+    return true;
+  }
+
+  append(chunk: string): void {
+    if (!chunk) return;
+    for (let i = 0; i < chunk.length; i += 1) {
+      const char = chunk[i] as '{' | '}' | '[' | ']' | '"' | string;
+      this.appendChar(char);
+    }
+  }
+
+  private appendChar(char: '{' | '}' | '[' | ']' | '"' | string) {
+    this.markStartIfNeeded(char);
+
+    this.buffer += char;
+    const inString = this.stack[this.stack.length - 1]?.char === '"';
+
+    if (char === '"') {
+      this.handleQuote(inString);
+      return;
     }
 
-    append(chunk: string): void {
-        const isEscapedQuote = (buf: string, idx: number) => {
-            // idx is position of '"' we just appended (buf.length-1)
-            let bs = 0;
-            for (let i = idx - 1; i >= 0 && buf[i] === '\\'; i--) bs++;
-            return (bs % 2) === 1;
-        };
+    if (inString) return;
+    this.handleStructuralToken(char);
+  }
 
-        for (let i = 0; i < chunk.length; i++) {
-            const char = chunk[i] as '{' | '}' | '[' | ']' | '"' | string;
+  private markStartIfNeeded(char: string) {
+    if (this.hasStarted || !/\S/.test(char)) return;
+    if (this.isStartChar(char)) {
+      this.hasStarted = true;
+      this.startEventPending = true;
+    }
+  }
 
-            // JSON start detection on first significant non-whitespace character
-            if (!this.hasStarted) {
-                const sig = /\S/.test(char);
-                if (sig && this.isStartChar(char)) {
-                    this.hasStarted = true;
-                    this.startEventPending = true;
-                }
-            }
+  private isEscapedQuote(buf: string, idx: number): boolean {
+    // idx is position of '"' we just appended (buf.length-1)
+    let backslashes = 0;
+    for (let i = idx - 1; i >= 0 && buf[i] === '\\'; i -= 1) backslashes += 1;
+    return (backslashes % 2) === 1;
+  }
 
-            this.buffer += char;
-            const top = this.stack[this.stack.length - 1];
-            const inString = top?.char === '"';
+  private handleQuote(alreadyInString: boolean) {
+    if (alreadyInString) {
+      if (!this.isEscapedQuote(this.buffer, this.buffer.length - 1)) {
+        this.stack.pop();
+      }
+      return;
+    }
+    this.stack.push({ char: '"', pos: this.buffer.length - 1 });
+  }
 
-            // Quote handling (respect escapes)
-            if (char === '"') {
-                if (inString) {
-                    if (!isEscapedQuote(this.buffer, this.buffer.length - 1)) {
-                        this.stack.pop();
-                    }
-                } else {
-                    this.stack.push({char: '"', pos: this.buffer.length - 1});
-                }
-                continue;
-            }
+  private handleStructuralToken(char: '{' | '}' | '[' | ']' | string) {
+    const top = this.stack[this.stack.length - 1];
+    if (char === '{') {
+      this.stack.push({ char, pos: this.buffer.length - 1 });
+      this.lastClosure = null;
+      return;
+    }
+    if (char === '}') {
+      if (top && top.char === '{') this.stack.pop();
+      this.lastClosure = 'object';
+      return;
+    }
+    if (char === '[') {
+      this.stack.push({ char, pos: this.buffer.length - 1 });
+      this.lastClosure = null;
+      return;
+    }
+    if (char === ']') {
+      if (top && top.char === '[') this.stack.pop();
+      this.lastClosure = 'array';
+    }
+  }
 
-            // Ignore structural tokens while inside a string
-            if (inString) continue;
+  parse(isFinal: boolean): ParseTuple {
+    try {
+      this.forcedClosures = 0;
+      const parsedState = this.parseBuffer(isFinal);
+      return this.toTuple(parsedState);
+    } catch (e) {
+      // If we intentionally deferred closure (e.g., inside an open string or numeric literal),
+      // signal UNPARSABLE without changing state.
+      if (e instanceof DoNotCloseJson) {
+        return this.toTuple(this.unparsableState());
+      }
+      return this.toTuple(this.unparsableState());
+    }
+  }
 
-            if (char === '{') {
-                this.stack.push({char, pos: this.buffer.length - 1});
-                this.closedObject = false;
-            } else if (char === '}') {
-                if (top && top.char === '{') this.stack.pop();
-                this.closedObject = true;
-            } else if (char === '[') {
-                this.stack.push({char, pos: this.buffer.length - 1});
-                this.closedArray = false;
-            } else if (char === ']') {
-                if (top && top.char === '[') this.stack.pop();
-                this.closedArray = true;
-            }
-        }
+  private isStartChar(ch: string): boolean {
+    // Valid first non-whitespace chars for a JSON text: { [ " - 0..9 t f n
+    return (
+      ch === '{' ||
+      ch === '[' ||
+      ch === '"' ||
+      ch === '-' ||
+      (ch >= '0' && ch <= '9') ||
+      ch === 't' || // true
+      ch === 'f' || // false
+      ch === 'n' // null
+    );
+  }
+
+  private maybeCompleteLiteral(buf: string): string {
+    // do not complete inside a string
+    const inString = this.stack[this.stack.length - 1]?.char === '"';
+    if (inString) return buf;
+
+    const trimmed = buf.replace(/\s+$/g, '');
+    if (!trimmed) return buf;
+
+    // already complete -> no-op
+    if (/(true|false|null)$/.test(trimmed)) return buf;
+
+    // grab trailing letters
+    const m = /[a-z]+$/.exec(trimmed);
+    if (!m) return buf;
+    const word = m[0]; // e.g., 't', 'tr', 'fal', 'nu', 'nul'
+    if (!/^[tfn]$|^(tru?)$|^(f(al?s?)?)$|^(nu?l?)$/.test(word)) return buf;
+
+    const target = word[0] === 't' ? 'true' : word[0] === 'f' ? 'false' : 'null';
+    if (!target.startsWith(word)) return buf;
+
+    // value boundary check: prev significant char must be start/':'/','/'['
+    let j = m.index - 1;
+    while (j >= 0 && /\s/.test(trimmed[j])) j -= 1;
+    const prev = j >= 0 ? trimmed[j] : null;
+    const boundaryOK = prev === null || prev === ':' || prev === ',' || prev === '[';
+    if (!boundaryOK) return buf;
+
+    return buf + target.slice(word.length);
+  }
+
+  private parseBuffer(isFinal: boolean): ParsedState {
+    const closed = this.closeForParse(isFinal);
+
+    // Guard: nothing to parse
+    if (!closed || closed.trim().length === 0) {
+      return this.unparsableState();
     }
 
-    parse(isFinal: boolean): [hasChanged: boolean, parsed: any | typeof UNPASSABLE, stack: StackEntry[], forcedClosures: number] {
-        try {
-            const closed = this.closeForParse(isFinal);
+    const parsed = JSON.parse(closed);
+    const serialized = JSON.stringify(parsed);
+    const hasChanged = this.computeChange(serialized);
 
-            // Guard: nothing to parse
-            if (!closed || closed.trim().length === 0) {
-                return [false, UNPASSABLE, this.stack.slice(), this.forcedClosures];
-            }
+    return {
+      hasChanged,
+      parsed,
+      stack: this.stack.slice(),
+      forcedClosures: this.forcedClosures,
+    };
+  }
 
-            const parsed = JSON.parse(closed);
-            const size = JSON.stringify(parsed).length;
+  private toTuple(state: ParsedState): ParseTuple {
+    return [state.hasChanged, state.parsed, state.stack, state.forcedClosures];
+  }
 
-            let hasChanged = false;
-            if (size > this.prevSize) {
-                hasChanged = true;
-                this.prevSize = size;
-            } else {
-                // XOR: if one of object/array just closed, treat as change when object closed
-                if (this.closedObject !== this.closedArray) {
-                    hasChanged = this.closedObject;
-                    this.closedObject = false;
-                }
-            }
+  private unparsableState(): ParsedState {
+    return {hasChanged: false, parsed: UNPARSABLE, stack: this.stack.slice(), forcedClosures: this.forcedClosures};
+  }
 
-            return [hasChanged, parsed, this.stack.slice(), this.forcedClosures];
-        } catch (e) {
-            // If we intentionally deferred closure (e.g., inside an open string or numeric literal),
-            // signal UNPASSABLE without changing state.
-            if (e instanceof DoNotCloseJson) {
-                return [false, UNPASSABLE, this.stack.slice(), this.forcedClosures];
-            }
-            return [false, UNPASSABLE, this.stack.slice(), this.forcedClosures];
-        }
+  private computeChange(serialized: string): boolean {
+    if (this.prevSerialized === null) {
+      this.prevSerialized = serialized;
+      this.lastClosure = null;
+      return true;
+    }
+    if (serialized !== this.prevSerialized) {
+      this.prevSerialized = serialized;
+      this.lastClosure = null;
+      return true;
+    }
+    const closureChange = this.lastClosure === 'object';
+    this.lastClosure = null;
+    return closureChange;
+  }
+
+  private closeForParse(isFinal: boolean): string {
+    // If we're inside a string, do not attempt any closure yet
+    if (this.stack.length && this.stack[this.stack.length - 1].char === '"') {
+      throw new DoNotCloseJson();
     }
 
-    private isStartChar(ch: string): boolean {
-        // Valid first non-whitespace chars for a JSON text: { [ " - 0..9 t f n
-        return (
-            ch === '{' ||
-            ch === '[' ||
-            ch === '"' ||
-            ch === '-' ||
-            (ch >= '0' && ch <= '9') ||
-            ch === 't' || // true
-            ch === 'f' || // false
-            ch === 'n'    // null
-        );
+    if (!isFinal && this.numericPattern.test(this.buffer)) {
+      throw new DoNotCloseJson();
     }
 
-    private maybeCompleteLiteral(buf: string): string {
-        // do not complete inside a string
-        const inString = this.stack[this.stack.length - 1]?.char === '"';
-        if (inString) return buf;
+    let closeBuf = this.buffer.replace(/\s+$/g, '');
+    // NEW: complete true/false/null prefixes at value boundaries
+    closeBuf = this.maybeCompleteLiteral(closeBuf);
 
-        const trimmed = buf.replace(/\s+$/g, '');
-        if (!trimmed) return buf;
-
-        // already complete -> no-op
-        if (/(true|false|null)$/.test(trimmed)) return buf;
-
-        // grab trailing letters
-        const m = /[a-z]+$/.exec(trimmed);
-        if (!m) return buf;
-        const word = m[0];                 // e.g., 't', 'tr', 'fal', 'nu', 'nul'
-        if (!/^[tfn]$|^(tru?)$|^(f(al?s?)?)$|^(nu?l?)$/.test(word)) return buf;
-
-        const target = word[0] === 't' ? 'true' : word[0] === 'f' ? 'false' : 'null';
-        if (!target.startsWith(word)) return buf;
-
-        // value boundary check: prev significant char must be start/':'/','/'['
-        let j = m.index - 1;
-        while (j >= 0 && /\s/.test(trimmed[j])) j--;
-        const prev = j >= 0 ? trimmed[j] : null;
-        const boundaryOK = prev === null || prev === ':' || prev === ',' || prev === '[';
-        if (!boundaryOK) return buf;
-
-        return buf + target.slice(word.length);
+    let forced = 0;
+    // Iterate open containers from inner to outer
+    for (let i = this.stack.length - 1; i >= 0; i -= 1) {
+      const { char, pos } = this.stack[i];
+      let inner = closeBuf.slice(pos + 1).trim();
+      if (inner.endsWith(',')) inner = inner.slice(0, -1).trim();
+      if (inner) {
+        if (char === '{') {
+          closeBuf = closeBuf.replace(/,\s*$/g, '');
+          closeBuf += '}';
+          forced += 1;
+        } else if (char === '[') {
+          closeBuf = closeBuf.replace(/,\s*$/g, '');
+          closeBuf += ']';
+          forced += 1;
+        }
+      }
+      // else leave empty containers open until more input arrives
     }
-
-    private closeForParse(isFinal: boolean): string {
-        // If we're inside a string, do not attempt any closure yet
-        if (this.stack.length && this.stack[this.stack.length - 1].char === '"') {
-            throw new DoNotCloseJson();
-        }
-
-        if (!isFinal) {
-            if (this.numericPattern.test(this.buffer)) {
-                throw new DoNotCloseJson();
-            }
-        }
-
-        let closeBuf = this.buffer.replace(/\s+$/g, '');
-        // NEW: complete true/false/null prefixes at value boundaries
-        closeBuf = this.maybeCompleteLiteral(closeBuf);
-
-        let forced = 0;
-        // Iterate open containers from inner to outer
-        for (let i = this.stack.length - 1; i >= 0; i--) {
-            const {char, pos} = this.stack[i];
-            let inner = closeBuf.slice(pos + 1).trim();
-            if (inner.endsWith(',')) inner = inner.slice(0, -1).trim();
-            if (inner) {
-                if (char === '{') {
-                    closeBuf = closeBuf.replace(/,\s*$/g, '');
-                    closeBuf += '}';
-                    forced += 1;
-                } else if (char === '[') {
-                    closeBuf = closeBuf.replace(/,\s*$/g, '');
-                    closeBuf += ']';
-                    forced += 1;
-                }
-            }
-            // else leave empty containers open until more input arrives
-        }
-        this.forcedClosures = forced;
-        return closeBuf;
-    }
+    this.forcedClosures = forced;
+    return closeBuf;
+  }
 }
 
-export interface StreamParseResult {
-    index: number;
-    status: Status;
-    data: any;                 // parsed JSON or null for start event
-    forced_closures: number;
-    event?: 'JSON_STARTED';    // optional one-time event
+export interface RawJsonParseResult {
+  index: number;
+  status: RawJsonStatus;
+  data: any; // parsed JSON or null for start event
+  forcedClosures: number;
+  event?: 'JSON_STARTED'; // optional one-time event
 }
 
-export class StreamParser {
-    private jsonCloser = new JsonCloser();
-    private entityIndex = 0;
-    private lastDepth = 0;
+/**
+ * Consumes text chunks and emits incremental JSON parse results whenever the
+ * payload becomes valid JSON (or when the stream is finalized).
+ */
+export class RawJsonStreamParser {
+  private jsonCloser = new RawJsonCloser();
+  private entityIndex = 0;
+  private lastDepth = 0;
 
-    parse(chunk: string, isFinal: boolean): StreamParseResult | null {
-        const index = this.entityIndex;
+  private makeResult(index: number, status: RawJsonStatus, data: any, forcedClosures: number, startedNow: boolean): RawJsonParseResult {
+    const result: RawJsonParseResult = {index, status, data, forcedClosures};
+    if (startedNow) result.event = 'JSON_STARTED';
+    return result;
+  }
 
-        // Coerce non-string chunks defensively; some transports may deliver undefined/null
-        const chunkStr = chunk; // parameter is typed as string; keep simple
+  private resetCloser() {
+    this.entityIndex += 1;
+    this.lastDepth = 0;
+    this.jsonCloser = new RawJsonCloser();
+  }
 
-        // If we got an empty chunk and this isn't the final flush, do nothing
-        if (!isFinal && chunkStr.length === 0) {
-            return null;
-        }
+  parse(chunk: string, isFinal: boolean): RawJsonParseResult | null {
+    const index = this.entityIndex;
 
-        this.jsonCloser.append(chunkStr);
-
-        // Emit a one-time JSON_STARTED event as soon as the first valid starter arrives
-        const startedNow = this.jsonCloser.consumeStartEvent();
-
-        const [hasChanged, resJson, stack, forced] = this.jsonCloser.parse(isFinal);
-
-        // Completed when we transition from open stack to empty stack with a parseable JSON value
-        const completed = this.lastDepth > 0 && stack.length === 0 && resJson !== UNPASSABLE;
-        if (completed) {
-            const result: StreamParseResult = {
-                index,
-                status: 'COMPLETED',
-                data: resJson,
-                forced_closures: forced,
-            };
-            if (startedNow) result.event = 'JSON_STARTED';
-            this.entityIndex += 1;
-            this.lastDepth = 0;
-            // Reset to avoid trailing non-JSON junk contaminating new parses
-            this.jsonCloser = new JsonCloser();
-            return result;
-        }
-        this.lastDepth = stack.length;
-
-        // If nothing parseable yet, but we just detected start, emit the start event
-        if (resJson === UNPASSABLE) {
-            if (startedNow) {
-                return {
-                    index,
-                    status: 'PARTIAL',
-                    data: null,
-                    forced_closures: 0,
-                    event: 'JSON_STARTED',
-                };
-            }
-            return null;
-        }
-
-        // Normal emission; include the start event tag if it coincides with first parseable state
-        if (isFinal || hasChanged) {
-            const result: StreamParseResult = {
-                index,
-                status: 'PARTIAL',
-                data: resJson,
-                forced_closures: forced,
-            };
-            if (startedNow) result.event = 'JSON_STARTED';
-            return result;
-        }
-        return null;
+    // If we got an empty chunk and this isn't the final flush, do nothing
+    if (!isFinal && chunk.length === 0) {
+      return null;
     }
+
+    this.jsonCloser.append(chunk);
+
+    // Emit a one-time JSON_STARTED event as soon as the first valid starter arrives
+    const startedNow = this.jsonCloser.consumeStartEvent();
+
+    const [hasChanged, parsedJson, parseStack, forcedClosures] = this.jsonCloser.parse(isFinal);
+
+    // Completed when we transition from open stack to empty stack with a parseable JSON value
+    const completed = this.lastDepth > 0 && parseStack.length === 0 && parsedJson !== UNPARSABLE;
+    if (completed) {
+      const result = this.makeResult(index, 'COMPLETED', parsedJson, forcedClosures, startedNow);
+      // Reset to avoid trailing non-JSON junk contaminating new parses
+      this.resetCloser();
+      return result;
+    }
+    this.lastDepth = parseStack.length;
+
+    // If nothing parseable yet, but we just detected start, emit the start event
+    if (parsedJson === UNPARSABLE) {
+      if (startedNow) {
+        return this.makeResult(index, 'PARTIAL', null, 0, true);
+      }
+      return null;
+    }
+
+    // Normal emission; include the start event tag if it coincides with first parseable state
+    if (isFinal || hasChanged) {
+      return this.makeResult(index, 'PARTIAL', parsedJson, forcedClosures, startedNow);
+    }
+    return null;
+  }
 }
 

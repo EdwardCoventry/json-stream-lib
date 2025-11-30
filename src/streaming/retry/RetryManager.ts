@@ -1,5 +1,9 @@
-import {RetryPhase, type IRetryManager, type RetryScheduleOptions} from '../types';
+import {type IRetryManager, type RetryScheduleOptions} from '../types.js';
 
+/**
+ * Minimal retry scheduler that simply waits for the computed backoff duration.
+ * Can be swapped out for more sophisticated transport/event bus implementations.
+ */
 export class RetryManager implements IRetryManager {
   async schedule(opts: RetryScheduleOptions): Promise<void> {
     // No external event bus; just wait with backoff.

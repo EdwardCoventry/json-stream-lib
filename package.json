@@ -1,19 +1,71 @@
 {
   "name": "@edwardcoventry/json-stream-lib",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "main": "dist/index.cjs",
-  "module": "dist/index.mjs",
-  "types": "dist/index.d.ts",
+  "private": false,
+  "description": "Incremental JSON stream parser and SSE helpers for AI responses.",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edwardcoventry/json-stream-lib.git"
+  },
+  "bugs": {
+    "url": "https://github.com/edwardcoventry/json-stream-lib/issues"
+  },
+  "homepage": "https://github.com/edwardcoventry/json-stream-lib#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
-    ".": "./src/index.ts",
-    "./streaming": "./src/streaming/index.ts"
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./streaming": {
+      "import": "./dist/streaming/index.js",
+      "types": "./dist/streaming/index.d.ts"
+    },
+    "./streaming/json-delta": {
+      "import": "./dist/streaming/json-delta/index.js",
+      "types": "./dist/streaming/json-delta/index.d.ts"
+    },
+    "./streaming/raw-json": {
+      "import": "./dist/streaming/raw-json/index.js",
+      "types": "./dist/streaming/raw-json/index.d.ts"
+    },
+    "./streaming/core": {
+      "import": "./dist/streaming/core/index.js",
+      "types": "./dist/streaming/core/index.d.ts"
+    },
+    "./query": {
+      "import": "./dist/query/QueryResponse.js",
+      "types": "./dist/query/QueryResponse.d.ts"
+    },
+    "./dist/*": "./dist/*"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/__tests__/**/*.js\"",
+    "prepublishOnly": "npm test"
   },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "json",
+    "streaming",
+    "sse",
+    "ai"
+  ],
   "devDependencies": {
+    "@types/node": "^24.10.1",
     "typescript": "^5.9.3"
   }
 }
