@@ -4,6 +4,14 @@ node_modules/
 # Build output
 dist/
 
+# Test output
+coverage/
+.nyc_output/
+
+# Package artifacts
+*.tgz
+npm-packages-offline-cache/
+
 # Debugging logs
 npm-debug.log*
 yarn-debug.log*
@@ -14,8 +22,14 @@ pnpm-debug.log*
 # TypeScript cache
 *.tsbuildinfo
 
+# Env/config
+.env
+.env.*
+.npmrc
+
 # OS artifacts
 .DS_Store
+Thumbs.db
 
 # Editor directories
 .vscode/

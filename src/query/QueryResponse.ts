@@ -2,6 +2,16 @@ import {RawJsonStreamParser, type RawJsonStatus} from '../jsonStream.js';
 import {STREAM_EVENT_NAME} from '../streaming/utils/eventBus.js';
 
 export type QueryResponseKind = string;
+export type QueryResponseLogLevel = 'debug' | 'info' | 'warn' | 'error' | 'log';
+
+export type QueryResponseLogger = Partial<Record<QueryResponseLogLevel, (...args: any[]) => void>>;
+
+export type QueryResponseOptions = {
+  listenToDom?: boolean;
+  logger?: QueryResponseLogger;
+  logEvents?: boolean;
+  eventLogLevel?: QueryResponseLogLevel;
+};
 
 export type QueryResponseSnapshot<K extends string = string> = {
   id: string;
@@ -37,6 +47,22 @@ export type QueryResponseEventListener = (ev: QueryResponseEvent) => void;
 type StreamEventDetail = {type?: string; data?: any};
 type LifecycleFlags = {headers?: boolean; firstByte?: boolean; acked?: boolean};
 
+const LOG_LEVELS: QueryResponseLogLevel[] = ['debug', 'info', 'warn', 'error', 'log'];
+
+const toSafeLogger = (logger?: QueryResponseLogger | null): QueryResponseLogger | null => {
+  if (!logger) return null;
+  const safeLogger: QueryResponseLogger = {};
+  for (const level of LOG_LEVELS) {
+    const fn = (logger as any)[level] || (logger as any).log;
+    if (typeof fn === 'function') {
+      safeLogger[level] = (...args: any[]) => {
+        try { fn(...args); } catch {}
+      };
+    }
+  }
+  return safeLogger;
+};
+
 /**
  * Tracks the lifecycle and payload of a streaming query keyed by sessionId.
  * Can listen to DOM events (STREAM_EVENT_NAME) or be driven via imperative push* calls.
@@ -48,6 +74,10 @@ export class QueryResponse<K extends string = string> {
   private readonly eventListeners = new Set<QueryResponseEventListener>();
   private boundHandler?: (ev: any) => void;
   private readonly listenToDom: boolean;
+  private logger: QueryResponseLogger | null;
+  private logEventsFlag: boolean;
+  private eventLogLevel: QueryResponseLogLevel;
+  private lastEventTs: number | null = null;
   private responseTextAcc = '';
   private responseJsonAcc = '';
   private jsonParser = new RawJsonStreamParser();
@@ -60,9 +90,12 @@ export class QueryResponse<K extends string = string> {
   private lastJsonValue: any | null = null;
   private readonly clock = () => Date.now();
 
-  constructor(id: string, kind: K = 'generic' as K, opts?: {listenToDom?: boolean}) {
+  constructor(id: string, kind: K = 'generic' as K, opts?: QueryResponseOptions) {
     this.id = id.trim();
     this.kind = kind;
+    this.logger = toSafeLogger(opts?.logger);
+    this.logEventsFlag = opts?.logEvents ?? Boolean(this.logger);
+    this.eventLogLevel = opts?.eventLogLevel || 'debug';
     this.listenToDom = opts?.listenToDom !== false; // default true for compatibility
     if (!this.id) {
       // No-op if no id; stays inert
@@ -103,6 +136,12 @@ export class QueryResponse<K extends string = string> {
     this.listeners.clear();
     this.eventListeners.clear();
     this.boundHandler = undefined;
+  }
+
+  configureLogger(logger?: QueryResponseLogger | null, opts?: {logEvents?: boolean; eventLogLevel?: QueryResponseLogLevel}) {
+    this.logger = toSafeLogger(logger);
+    if (typeof opts?.logEvents === 'boolean') this.logEventsFlag = opts.logEvents;
+    if (opts?.eventLogLevel) this.eventLogLevel = opts.eventLogLevel;
   }
 
   /** Subscribe to state changes; returns an unsubscribe function. */
@@ -255,8 +294,13 @@ export class QueryResponse<K extends string = string> {
   }
 
   private emitEvent(ev: QueryResponseEvent) {
+    const ts = typeof ev.ts === 'number' ? ev.ts : this.clock();
+    const event = typeof ev.ts === 'number' ? ev : ({...ev, ts} as QueryResponseEvent);
+    const deltaMs = this.lastEventTs === null ? 0 : ts - this.lastEventTs;
+    this.lastEventTs = ts;
+    this.logEvent(event, ts, deltaMs);
     for (const listener of Array.from(this.eventListeners)) {
-      try { listener(ev); } catch {}
+      try { listener(event); } catch {}
     }
   }
 
@@ -284,5 +328,43 @@ export class QueryResponse<K extends string = string> {
     if (type === 'stream.end' || type === 'response.completed') return this.markCompleted();
 
     if (type === 'error' || type === 'response.error') this.pushError(data);
+  }
+
+  private logEvent(ev: QueryResponseEvent, ts: number, deltaMs: number) {
+    if (!this.logEventsFlag || !this.logger) return;
+    const logFn = this.logger[this.eventLogLevel] || this.logger.log;
+    if (!logFn) return;
+    const payload = {
+      id: this.id,
+      kind: this.kind,
+      event: ev.type,
+      ts,
+      deltaMs,
+      data: this.summarizeEventData(ev),
+    };
+    try { logFn(`[qr:${this.id}] ${ev.type}`, payload); } catch {}
+  }
+
+  private summarizeEventData(ev: QueryResponseEvent) {
+    if (ev.type === 'text-delta') {
+      return {deltaChars: ev.data?.delta?.length ?? 0, fullChars: ev.data?.fullText?.length ?? 0};
+    }
+    if (ev.type === 'json-delta') {
+      return {deltaChars: ev.data?.delta?.length ?? 0};
+    }
+    if (ev.type === 'json-partial') {
+      return {
+        index: ev.data?.index,
+        status: ev.data?.status,
+        forcedClosures: ev.data?.forcedClosures ?? 0,
+      };
+    }
+    if (ev.type === 'json-completed') {
+      return {index: ev.data?.index, value: ev.data?.value};
+    }
+    if (ev.type === 'sse') return {eventType: ev.data?.eventType};
+    if (ev.type === 'meta' || ev.type === 'headers' || ev.type === 'first-byte') return ev.data ?? null;
+    if ('data' in ev) return (ev as any).data ?? null;
+    return null;
   }
 }
