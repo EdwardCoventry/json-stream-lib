@@ -7,42 +7,108 @@ export function pickString(v: any): string {
   return '';
 }
 
-export function routeContentObject(obj: any, isJsonStructured: boolean, handlers: {handleTextDelta:(s:string)=>void; handleJsonDelta:(s:string)=>void}) {
-  try {
-    if (Object.prototype.hasOwnProperty.call(obj || {}, 'output_json')) {
-      const out = (obj as any).output_json;
-      const jsonStr = typeof out === 'string' ? out : JSON.stringify(out);
-      if (jsonStr) return handlers.handleJsonDelta(jsonStr);
+export function routeContentObject(
+  obj: any,
+  isJsonStructured: boolean,
+  handlers: {handleTextDelta:(s:string)=>void; handleJsonDelta:(s:string)=>void},
+): boolean {
+  let delivered = false;
+  const pushText = (s: string) => {
+    if (!s) return;
+    delivered = true;
+    isJsonStructured ? handlers.handleJsonDelta(s) : handlers.handleTextDelta(s);
+  };
+  const pushJson = (val: any) => {
+    if (typeof val === 'undefined' || val === null) return;
+    const jsonStr = typeof val === 'string' ? val : JSON.stringify(val);
+    if (!jsonStr) return;
+    delivered = true;
+    handlers.handleJsonDelta(jsonStr);
+  };
+  const maybeOutputJson = (val: any): boolean => {
+    if (typeof val === 'undefined' || val === null) return false;
+    pushJson(val);
+    return true;
+  };
+  const maybeOutputText = (val: any): boolean => {
+    if (!val) return false;
+    let used = false;
+    if (typeof val === 'string') {
+      pushText(val);
+      return true;
     }
+    const simple = pickString(val);
+    if (simple) {
+      pushText(simple);
+      used = true;
+    }
+    const parts = Array.isArray(val) ? val : (Array.isArray((val as any).content) ? (val as any).content : []);
+    for (const part of parts) {
+      if (!part) continue;
+      if (part.type === 'output_json') {
+        pushJson((part as any).json);
+        used = true;
+        continue;
+      }
+      const s = pickString(part);
+      if (s) {
+        pushText(s);
+        used = true;
+      }
+      const nested = Array.isArray((part as any).content) ? (part as any).content : [];
+      for (const inner of nested) {
+        if (!inner) continue;
+        if (inner.type === 'output_json') {
+          pushJson((inner as any).json);
+          used = true;
+          continue;
+        }
+        const si = pickString(inner);
+        if (si) {
+          pushText(si);
+          used = true;
+        }
+      }
+    }
+    return used;
+  };
+
+  try {
+    if (maybeOutputJson((obj as any)?.output_parsed)) return true;
+    if (maybeOutputJson((obj as any)?.output_json)) return true;
+    if (maybeOutputText((obj as any)?.output_text)) return delivered;
+
     const simple = pickString(obj);
-    if (simple) return isJsonStructured ? handlers.handleJsonDelta(simple) : handlers.handleTextDelta(simple);
+    if (simple) {
+      pushText(simple);
+      return delivered;
+    }
     const item = (obj as any)?.item;
     if (item && Array.isArray(item.content)) {
       for (const el of item.content) {
         if (!el) continue;
         if (el.type === 'output_json') {
-          const j = typeof el.json === 'string' ? el.json : (el.json ? JSON.stringify(el.json) : '');
-          if (j) handlers.handleJsonDelta(j);
+          pushJson((el as any).json);
           continue;
         }
         const s = pickString(el);
-        if (s) isJsonStructured ? handlers.handleJsonDelta(s) : handlers.handleTextDelta(s);
+        if (s) pushText(s);
       }
-      return;
+      return delivered;
     }
     const content = (obj as any)?.content;
     if (Array.isArray(content)) {
       for (const el of content) {
         if (!el) continue;
         if (el.type === 'output_json') {
-          const j = typeof el.json === 'string' ? el.json : (el.json ? JSON.stringify(el.json) : '');
-          if (j) handlers.handleJsonDelta(j);
+          pushJson((el as any).json);
           continue;
         }
         const s = pickString(el);
-        if (s) isJsonStructured ? handlers.handleJsonDelta(s) : handlers.handleTextDelta(s);
+        if (s) pushText(s);
       }
-      return;
+      return delivered;
     }
   } catch {}
+  return delivered;
 }

@@ -65,3 +65,20 @@ test('routeJsonDeltaEvent routes text, JSON, content, and completion events', ()
   assert.equal(seen.completed, 2); // output_item.done + response.completed
   assert.ok(seen.merged[0]?.content === 'choice-delta');
 });
+
+test('routeJsonDeltaEvent extracts output_json/output_text payloads and completion events', () => {
+  const seen = {json: [] as string[], completed: 0};
+  const handlers = {
+    handleTextDelta: (d: string) => seen.json.push(d),
+    handleJsonDelta: (d: string) => seen.json.push(d),
+    mergeDelta: () => {},
+    markCompleted: () => { seen.completed += 1; },
+  };
+
+  routeJsonDeltaEvent('response.output_json.delta', JSON.stringify({output_json: {score: 7}}), true, handlers);
+  routeJsonDeltaEvent('response.output_text.delta', JSON.stringify({output_text: [{content: [{type: 'output_text', text: 'hi'}]}]}), true, handlers);
+  routeJsonDeltaEvent('response.output_json.done', JSON.stringify({output_parsed: {final: true}}), true, handlers);
+
+  assert.deepEqual(seen.json, ['{"score":7}', 'hi', '{"final":true}']);
+  assert.equal(seen.completed, 1);
+});
