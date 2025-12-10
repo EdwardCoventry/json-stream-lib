@@ -16,6 +16,7 @@ export type RawJsonStreamOptions<TChunk = string> = {
   onPartial?: (value: any, meta: { index: number; forcedClosures: number; status: RawJsonStatus }) => void;
   onComplete?: (value: any, meta: { index: number; forcedClosures: number }) => void;
   coerce?: (chunk: TChunk) => string;
+  emitEmptyContainers?: boolean;
 };
 
 function emitParseResult(
@@ -44,7 +45,7 @@ function emitParseResult(
  * not already structured as JSON deltas.
  */
 export async function runRawJsonStream<TChunk = string>(opts: RawJsonStreamOptions<TChunk>) {
-  const parser = opts.parser ?? new RawJsonStreamParser();
+  const parser = opts.parser ?? new RawJsonStreamParser({ emitEmptyContainers: opts.emitEmptyContainers });
   const coerce = opts.coerce ?? ((c: TChunk) => String(c ?? ''));
   const emit = opts.onEvent ?? (() => {});
 
@@ -68,8 +69,8 @@ export async function runRawJsonStream<TChunk = string>(opts: RawJsonStreamOptio
  * Helper patterned after the recipe/text-only flow: incrementally parse text
  * deltas and emit domain-friendly events without wiring an async iterable.
  */
-export function createRawJsonEmitter(onEvent: (ev: RawJsonStreamEvent) => void) {
-  let parser = new RawJsonStreamParser();
+export function createRawJsonEmitter(onEvent: (ev: RawJsonStreamEvent) => void, opts: { emitEmptyContainers?: boolean } = {}) {
+  let parser = new RawJsonStreamParser({ emitEmptyContainers: opts.emitEmptyContainers });
   const emit = (ev: RawJsonStreamEvent) => {
     try { onEvent(ev); } catch {}
   };
@@ -84,7 +85,7 @@ export function createRawJsonEmitter(onEvent: (ev: RawJsonStreamEvent) => void) 
       emitParseResult(res, emit);
     },
     reset() {
-      parser = new RawJsonStreamParser();
+      parser = new RawJsonStreamParser({ emitEmptyContainers: opts.emitEmptyContainers });
     },
   };
 }

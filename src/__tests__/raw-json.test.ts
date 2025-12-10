@@ -64,3 +64,35 @@ test('RawJsonCloser completes literal prefixes at value boundaries', () => {
   const [, parsed] = closer.parse(false);
   assert.deepEqual(parsed, {ok: true});
 });
+
+test('RawJsonStreamParser emits empty containers when enabled', () => {
+  const parser = new RawJsonStreamParser({emitEmptyContainers: true});
+
+  const emptyArray = parser.parse('{"items": [', false);
+  assert.ok(emptyArray);
+  assert.equal(emptyArray?.status, 'PARTIAL');
+  assert.deepEqual(emptyArray?.data, {items: []});
+  assert.ok((emptyArray?.forcedClosures ?? 0) >= 1);
+
+  const objParser = new RawJsonStreamParser({emitEmptyContainers: true});
+  const emptyObject = objParser.parse('{"obj": {', false);
+  assert.ok(emptyObject);
+  assert.equal(emptyObject?.status, 'PARTIAL');
+  assert.deepEqual(emptyObject?.data, {obj: {}});
+  assert.ok((emptyObject?.forcedClosures ?? 0) >= 1);
+});
+
+test('RawJsonStreamParser discards dangling tokens but still emits empty containers', () => {
+  const parser = new RawJsonStreamParser({emitEmptyContainers: true});
+
+  const partialStringValue = parser.parse('{"items": ["te', false);
+  assert.ok(partialStringValue);
+  assert.equal(partialStringValue?.status, 'PARTIAL');
+  assert.deepEqual(partialStringValue?.data, {items: []});
+
+  const nestedParser = new RawJsonStreamParser({emitEmptyContainers: true});
+  const partialNestedObject = nestedParser.parse('{"items": [{"th', false);
+  assert.ok(partialNestedObject);
+  assert.equal(partialNestedObject?.status, 'PARTIAL');
+  assert.deepEqual(partialNestedObject?.data, {items: [{}]});
+});

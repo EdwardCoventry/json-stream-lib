@@ -1,10 +1,10 @@
 # json-stream-lib
 
-Incremental JSON streaming helpers for SSE responses and raw text streams (preview `0.0.0`).
+Incremental JSON streaming helpers for SSE responses and raw text streams (preview `0.0.2`).
 
 ## Features
 - Merge structured SSE deltas (`response.output_json.delta`, `response.content_part.added`, `response.output_text.delta`, `[DONE]`) into partial/final JSON plus text slices.
-- Parse plain text streams into JSON with partial + completed callbacks and auto-closure support for braces/brackets/booleans/nulls.
+- Parse plain text streams into JSON with partial + completed callbacks and auto-closure support for braces/brackets/booleans/nulls (now optionally emits empty `{}` / `[]` when containers are still empty).
 - Reusable primitives for throttling, retries, watchdogs, and DOM debug events to plug into UIs.
 
 ## Install
@@ -71,6 +71,7 @@ await runRawJsonStream({
 });
 ```
 For manual control, `RawJsonStreamParser` exposes `parse(chunk, isFinal)` and emits `{status: 'PARTIAL' | 'COMPLETED', data, forcedClosures, event?: 'JSON_STARTED'}`. It auto-completes literal prefixes (`tr` → `true`, `fal` → `false`, `nu` → `null`) when they appear at value boundaries and still emits a change when a forced close is later replaced by a real brace/bracket. More in `docs/raw-text-to-json.md`.
+Empty container emission: enabled by default; disable via `new RawJsonStreamParser({ emitEmptyContainers: false })` or `runRawJsonStream({ emitEmptyContainers: false, ... })`.
 
 ## Debug and events
 - `emitJsonDeltaDebugEvent`, `emitJsonDeltaErrorReport`, and `emitJsonDeltaRetryEvent` expose DOM CustomEvents for logging, metrics, and UI reporting.

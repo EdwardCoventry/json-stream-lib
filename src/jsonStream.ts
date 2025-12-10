@@ -31,6 +31,8 @@ export class RawJsonCloser {
   private forcedClosures = 0;
   private readonly numericPattern = /-?\d+(\.\d*)?([eE][-+]?\d+)?$/;
 
+  constructor(private readonly emitEmptyContainers = true) {}
+
   // JSON start detection
   private hasStarted = false;
   private startEventPending = false;
@@ -128,6 +130,30 @@ export class RawJsonCloser {
     }
   }
 
+  private pruneDanglingStringForEmptyEmit() {
+    if (!this.emitEmptyContainers) return;
+    const topIdx = this.stack.length - 1;
+    if (topIdx < 0) return;
+    const top = this.stack[topIdx];
+    if (!top || top.char !== '"') return;
+
+    // Find the nearest open container beneath the dangling string
+    let containerIdx = -1;
+    for (let i = topIdx - 1; i >= 0; i -= 1) {
+      if (this.stack[i].char === '{' || this.stack[i].char === '[') {
+        containerIdx = i;
+        break;
+      }
+    }
+    if (containerIdx === -1) return;
+
+    const containerPos = this.stack[containerIdx].pos;
+    // Drop everything inside the container (including the dangling string)
+    this.buffer = this.buffer.slice(0, containerPos + 1);
+    this.buffer = this.buffer.replace(/\s+$/g, '').replace(/,\s*$/g, '');
+    this.stack = this.stack.slice(0, containerIdx + 1);
+  }
+
   private isStartChar(ch: string): boolean {
     // Valid first non-whitespace chars for a JSON text: { [ " - 0..9 t f n
     return (
@@ -217,9 +243,12 @@ export class RawJsonCloser {
   }
 
   private closeForParse(isFinal: boolean): string {
-    // If we're inside a string, do not attempt any closure yet
+    // If we're inside a string, optionally discard the dangling token so we can close containers
     if (this.stack.length && this.stack[this.stack.length - 1].char === '"') {
-      throw new DoNotCloseJson();
+      this.pruneDanglingStringForEmptyEmit();
+      if (this.stack.length && this.stack[this.stack.length - 1].char === '"') {
+        throw new DoNotCloseJson();
+      }
     }
 
     if (!isFinal && this.numericPattern.test(this.buffer)) {
@@ -236,13 +265,13 @@ export class RawJsonCloser {
       const { char, pos } = this.stack[i];
       let inner = closeBuf.slice(pos + 1).trim();
       if (inner.endsWith(',')) inner = inner.slice(0, -1).trim();
-      if (inner) {
+      const shouldClose = inner || this.emitEmptyContainers;
+      if (shouldClose) {
+        closeBuf = closeBuf.replace(/,\s*$/g, '');
         if (char === '{') {
-          closeBuf = closeBuf.replace(/,\s*$/g, '');
           closeBuf += '}';
           forced += 1;
         } else if (char === '[') {
-          closeBuf = closeBuf.replace(/,\s*$/g, '');
           closeBuf += ']';
           forced += 1;
         }
@@ -267,9 +296,13 @@ export interface RawJsonParseResult {
  * payload becomes valid JSON (or when the stream is finalized).
  */
 export class RawJsonStreamParser {
-  private jsonCloser = new RawJsonCloser();
+  private jsonCloser: RawJsonCloser;
   private entityIndex = 0;
   private lastDepth = 0;
+
+  constructor(private readonly opts: { emitEmptyContainers?: boolean } = {}) {
+    this.jsonCloser = new RawJsonCloser(this.opts.emitEmptyContainers !== false);
+  }
 
   private makeResult(index: number, status: RawJsonStatus, data: any, forcedClosures: number, startedNow: boolean): RawJsonParseResult {
     const result: RawJsonParseResult = {index, status, data, forcedClosures};
@@ -280,7 +313,7 @@ export class RawJsonStreamParser {
   private resetCloser() {
     this.entityIndex += 1;
     this.lastDepth = 0;
-    this.jsonCloser = new RawJsonCloser();
+    this.jsonCloser = new RawJsonCloser(this.opts.emitEmptyContainers !== false);
   }
 
   parse(chunk: string, isFinal: boolean): RawJsonParseResult | null {
