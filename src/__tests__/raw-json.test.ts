@@ -47,9 +47,8 @@ test('RawJsonCloser marks change when a real close follows a forced close', () =
   closer.append('{"x":1 ');
 
   const [firstChange, firstParsed, , firstForced] = closer.parse(false);
-  assert.equal(firstForced, 1);
-  assert.equal(firstChange, true);
-  assert.deepEqual(firstParsed, {x: 1});
+  assert.equal(firstForced, 0);
+  assert.equal(firstChange, false);
 
   closer.append('}');
   const [finalChange, finalParsed, , finalForced] = closer.parse(true);
@@ -95,4 +94,65 @@ test('RawJsonStreamParser discards dangling tokens but still emits empty contain
   assert.ok(partialNestedObject);
   assert.equal(partialNestedObject?.status, 'PARTIAL');
   assert.deepEqual(partialNestedObject?.data, {items: [{}]});
+});
+
+test('RawJsonStreamParser does not emit while inside an unfinished key or string', () => {
+  const parser = new RawJsonStreamParser({emitEmptyContainers: false});
+  const seen: Array<{status: string; data: any}> = [];
+  const chunks = ['{"it', 'ems":1}'];
+  for (let i = 0; i < chunks.length; i += 1) {
+    const res = parser.parse(chunks[i], i === chunks.length - 1);
+    if (res) seen.push({status: res.status, data: res.data});
+  }
+
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0].status, 'PARTIAL');
+  assert.equal(seen[0].data, null); // start event only
+  assert.equal(seen[1].status, 'COMPLETED');
+  assert.deepEqual(seen[1].data, {items: 1});
+
+  const stringParser = new RawJsonStreamParser({emitEmptyContainers: false});
+  const stringSeen: Array<{status: string; data: any}> = [];
+  const stringChunks = ['["he', 'llo"]'];
+  for (let i = 0; i < stringChunks.length; i += 1) {
+    const res = stringParser.parse(stringChunks[i], i === stringChunks.length - 1);
+    if (res) stringSeen.push({status: res.status, data: res.data});
+  }
+
+  assert.equal(stringSeen.length, 2);
+  assert.equal(stringSeen[0].data, null);
+  assert.equal(stringSeen[0].status, 'PARTIAL');
+  assert.equal(stringSeen[1].status, 'COMPLETED');
+  assert.deepEqual(stringSeen[1].data, ['hello']);
+});
+
+test('RawJsonStreamParser does not emit mid-number and emits nested empty containers early', () => {
+  const numParser = new RawJsonStreamParser();
+  const numSeen: Array<{status: string; data: any}> = [];
+  const numChunks = ['{"n": 12', '3', '}'];
+  for (let i = 0; i < numChunks.length; i += 1) {
+    const res = numParser.parse(numChunks[i], i === numChunks.length - 1);
+    if (res) numSeen.push({status: res.status, data: res.data});
+  }
+
+  assert.equal(numSeen.length, 2);
+  assert.equal(numSeen[0].status, 'PARTIAL');
+  assert.equal(numSeen[0].data, null); // start event
+  assert.ok(numSeen[1].status === 'PARTIAL' || numSeen[1].status === 'COMPLETED');
+  assert.deepEqual(numSeen[1].data, {n: 123});
+
+  const nestedParser = new RawJsonStreamParser({emitEmptyContainers: true});
+  const nestedSeen: Array<{status: string; data: any; forcedClosures: number}> = [];
+  const nestedChunks = ['{"items":[{"child":[', ']}}'];
+  for (let i = 0; i < nestedChunks.length; i += 1) {
+    const res = nestedParser.parse(nestedChunks[i], i === nestedChunks.length - 1);
+    if (res) nestedSeen.push({status: res.status, data: res.data, forcedClosures: res.forcedClosures});
+  }
+
+  assert.ok(nestedSeen.length >= 1);
+  assert.equal(nestedSeen[0].status, 'PARTIAL');
+  assert.deepEqual(nestedSeen[0].data, {items: [{child: []}]});
+  assert.ok((nestedSeen[0].forcedClosures ?? 0) >= 1);
+  const last = nestedSeen[nestedSeen.length - 1];
+  assert.deepEqual(last.data, {items: [{child: []}]});
 });

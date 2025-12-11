@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag or version to publish (e.g., v0.0.2)"
+        description: "Tag or version to publish (e.g., v0.0.4)"
         required: false
         default: ""
 

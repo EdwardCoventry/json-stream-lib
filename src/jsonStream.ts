@@ -130,28 +130,29 @@ export class RawJsonCloser {
     }
   }
 
-  private pruneDanglingStringForEmptyEmit() {
-    if (!this.emitEmptyContainers) return;
-    const topIdx = this.stack.length - 1;
-    if (topIdx < 0) return;
-    const top = this.stack[topIdx];
-    if (!top || top.char !== '"') return;
+  private pruneDanglingStringForEmptyEmit(buffer: string, stack: StackEntry[]): {buffer: string; stack: StackEntry[]} | null {
+    if (!this.emitEmptyContainers) return null;
+    const topIdx = stack.length - 1;
+    if (topIdx < 0) return null;
+    const top = stack[topIdx];
+    if (!top || top.char !== '"') return null;
 
     // Find the nearest open container beneath the dangling string
     let containerIdx = -1;
     for (let i = topIdx - 1; i >= 0; i -= 1) {
-      if (this.stack[i].char === '{' || this.stack[i].char === '[') {
+      if (stack[i].char === '{' || stack[i].char === '[') {
         containerIdx = i;
         break;
       }
     }
-    if (containerIdx === -1) return;
+    if (containerIdx === -1) return null;
 
-    const containerPos = this.stack[containerIdx].pos;
+    const containerPos = stack[containerIdx].pos;
     // Drop everything inside the container (including the dangling string)
-    this.buffer = this.buffer.slice(0, containerPos + 1);
-    this.buffer = this.buffer.replace(/\s+$/g, '').replace(/,\s*$/g, '');
-    this.stack = this.stack.slice(0, containerIdx + 1);
+    let prunedBuffer = buffer.slice(0, containerPos + 1);
+    prunedBuffer = prunedBuffer.replace(/\s+$/g, '').replace(/,\s*$/g, '');
+    const prunedStack = stack.slice(0, containerIdx + 1);
+    return {buffer: prunedBuffer, stack: prunedStack};
   }
 
   private isStartChar(ch: string): boolean {
@@ -242,27 +243,50 @@ export class RawJsonCloser {
     return closureChange;
   }
 
+  private hasPendingNumber(buf: string): boolean {
+    const trimmed = buf.replace(/\s+$/g, '');
+    const m = /(-?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][-+]?\d*)?)$/.exec(trimmed);
+    if (!m) return false;
+    const num = m[1];
+    const after = trimmed.slice(m.index + num.length);
+    if (after.length !== 0) return false;
+
+    // Incomplete exponent or trailing dot
+    if (/[eE][-+]?$/.test(num)) return true;
+    if (/\.$/.test(num)) return true;
+
+    // If we're mid-stream and the last token is a number without a closing delimiter,
+    // treat it as pending to allow more digits in the next chunk.
+    return true;
+  }
+
   private closeForParse(isFinal: boolean): string {
     // If we're inside a string, optionally discard the dangling token so we can close containers
-    if (this.stack.length && this.stack[this.stack.length - 1].char === '"') {
-      this.pruneDanglingStringForEmptyEmit();
-      if (this.stack.length && this.stack[this.stack.length - 1].char === '"') {
+    let closeBuf = this.buffer;
+    let parseStack = this.stack;
+    if (parseStack.length && parseStack[parseStack.length - 1].char === '"') {
+      const pruned = this.pruneDanglingStringForEmptyEmit(closeBuf, parseStack);
+      if (pruned) {
+        closeBuf = pruned.buffer;
+        parseStack = pruned.stack;
+      }
+      if (parseStack.length && parseStack[parseStack.length - 1].char === '"') {
         throw new DoNotCloseJson();
       }
     }
 
-    if (!isFinal && this.numericPattern.test(this.buffer)) {
+    if (!isFinal && this.hasPendingNumber(closeBuf)) {
       throw new DoNotCloseJson();
     }
 
-    let closeBuf = this.buffer.replace(/\s+$/g, '');
+    closeBuf = closeBuf.replace(/\s+$/g, '');
     // NEW: complete true/false/null prefixes at value boundaries
     closeBuf = this.maybeCompleteLiteral(closeBuf);
 
     let forced = 0;
     // Iterate open containers from inner to outer
-    for (let i = this.stack.length - 1; i >= 0; i -= 1) {
-      const { char, pos } = this.stack[i];
+    for (let i = parseStack.length - 1; i >= 0; i -= 1) {
+      const { char, pos } = parseStack[i];
       let inner = closeBuf.slice(pos + 1).trim();
       if (inner.endsWith(',')) inner = inner.slice(0, -1).trim();
       const shouldClose = inner || this.emitEmptyContainers;
@@ -330,16 +354,16 @@ export class RawJsonStreamParser {
     const startedNow = this.jsonCloser.consumeStartEvent();
 
     const [hasChanged, parsedJson, parseStack, forcedClosures] = this.jsonCloser.parse(isFinal);
+    const currentDepth = parseStack.length;
 
-    // Completed when we transition from open stack to empty stack with a parseable JSON value
-    const completed = this.lastDepth > 0 && parseStack.length === 0 && parsedJson !== UNPARSABLE;
+    const completed = parsedJson !== UNPARSABLE && (currentDepth === 0 || isFinal);
+    this.lastDepth = currentDepth;
+
     if (completed) {
       const result = this.makeResult(index, 'COMPLETED', parsedJson, forcedClosures, startedNow);
-      // Reset to avoid trailing non-JSON junk contaminating new parses
       this.resetCloser();
       return result;
     }
-    this.lastDepth = parseStack.length;
 
     // If nothing parseable yet, but we just detected start, emit the start event
     if (parsedJson === UNPARSABLE) {
@@ -356,4 +380,3 @@ export class RawJsonStreamParser {
     return null;
   }
 }
-
