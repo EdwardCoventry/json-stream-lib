@@ -64,4 +64,6 @@ emitter.finalize();
 ```
 Events:
 - `field` → `{ path, value, raw, entityIndex }`
+- `array-start` → `{ path, entityIndex }`
 - `array-item` → `{ path, index, value, raw, entityIndex }`
+- `array-end` → `{ path, length, raw, entityIndex }`

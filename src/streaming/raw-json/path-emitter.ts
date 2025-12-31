@@ -32,11 +32,27 @@ export type JsonPathStreamEvent =
       };
     }
   | {
+      type: "array-start";
+      data: {
+        path: string;
+        entityIndex: number;
+      };
+    }
+  | {
       type: "array-item";
       data: {
         path: string;
         index: number;
         value: any;
+        raw: string;
+        entityIndex: number;
+      };
+    }
+  | {
+      type: "array-end";
+      data: {
+        path: string;
+        length: number;
         raw: string;
         entityIndex: number;
       };
@@ -150,6 +166,29 @@ export function createJsonPathStreamEmitter(
     });
   };
 
+  const emitArrayStart = (path: string[], currentEntityIndex: number) => {
+    const joined = joinPath(path);
+    if (!arrays.has(joined)) return;
+    onEvent({
+      type: "array-start",
+      data: { path: joined, entityIndex: currentEntityIndex },
+    });
+  };
+
+  const emitArrayEnd = (
+    path: string[],
+    length: number,
+    raw: string,
+    currentEntityIndex: number,
+  ) => {
+    const joined = joinPath(path);
+    if (!arrays.has(joined)) return;
+    onEvent({
+      type: "array-end",
+      data: { path: joined, length, raw, entityIndex: currentEntityIndex },
+    });
+  };
+
   const completeValue = (
     value: any,
     raw: string,
@@ -254,6 +293,9 @@ export function createJsonPathStreamEmitter(
           };
 
     contexts.push(context);
+    if (type === "array") {
+      emitArrayStart(path, entityIndex);
+    }
   };
 
   const closeContainer = (expected: "object" | "array", pos: number) => {
@@ -299,6 +341,10 @@ export function createJsonPathStreamEmitter(
       type: context.type,
       path: joinPath(context.path),
     });
+
+    if (context.type === "array") {
+      emitArrayEnd(context.path, context.index, raw, entityIndex);
+    }
 
     contexts.pop();
     completeValue(parsed, raw, entityIndex);

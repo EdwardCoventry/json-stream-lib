@@ -15,8 +15,18 @@ test("emits tracked array items as they close", () => {
   });
 
   emitter.push('{"stages":[{"title":"Stage 1"}');
-  assert.equal(events.length, 1);
-  const first = events[0];
+  assert.equal(events.length, 2);
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["array-start", "array-item"]
+  );
+  const start = events[0];
+  assert.equal(start.type, "array-start");
+  if (start.type !== "array-start") throw new Error("expected array-start");
+  assert.equal(start.data.path, "stages");
+  assert.equal(start.data.entityIndex, 0);
+
+  const first = events[1];
   assert.equal(first.type, "array-item");
   if (first.type !== "array-item") throw new Error("expected array-item");
   assert.equal(first.data.path, "stages");
@@ -24,8 +34,8 @@ test("emits tracked array items as they close", () => {
   assert.deepEqual(first.data.value, { title: "Stage 1" });
 
   emitter.push(',{"title":"Stage 2"}');
-  assert.equal(events.length, 2);
-  const second = events[1];
+  assert.equal(events.length, 3);
+  const second = events[2];
   assert.equal(second.type, "array-item");
   if (second.type !== "array-item") throw new Error("expected array-item");
   assert.equal(second.data.index, 1);
@@ -33,6 +43,12 @@ test("emits tracked array items as they close", () => {
 
   emitter.push("]}");
   emitter.finalize();
+
+  const end = events[events.length - 1];
+  assert.equal(end.type, "array-end");
+  if (end.type !== "array-end") throw new Error("expected array-end");
+  assert.equal(end.data.path, "stages");
+  assert.equal(end.data.length, 2);
 });
 
 test("emits tracked array items for primitive values", () => {
@@ -45,8 +61,25 @@ test("emits tracked array items for primitive values", () => {
   emitter.push('{"tags":["a","b","c"]}');
   emitter.finalize();
 
-  const values = events.map((ev) => ev.data.value);
+  const values = events
+    .filter(
+      (ev): ev is Extract<JsonPathStreamEvent, { type: "array-item" }> =>
+        ev.type === "array-item"
+    )
+    .map((ev) => ev.data.value);
   assert.deepEqual(values, ["a", "b", "c"]);
+
+  const start = events.find((ev) => ev.type === "array-start");
+  assert.ok(start);
+  if (start?.type !== "array-start") throw new Error("expected array-start");
+  assert.equal(start.data.path, "tags");
+  assert.equal(start.data.entityIndex, 0);
+
+  const end = events.find((ev) => ev.type === "array-end");
+  assert.ok(end);
+  if (end?.type !== "array-end") throw new Error("expected array-end");
+  assert.equal(end.data.path, "tags");
+  assert.equal(end.data.length, 3);
 });
 
 test("emits tracked field values by path", () => {
@@ -59,9 +92,15 @@ test("emits tracked field values by path", () => {
   emitter.push('{"meta":{"inner":42},"title":"Hello"}');
   emitter.finalize();
 
-  const paths = events.map((ev) => ev.data.path).sort();
+  const fieldEvents = events.filter(
+    (ev): ev is Extract<JsonPathStreamEvent, { type: "field" }> =>
+      ev.type === "field"
+  );
+  const paths = fieldEvents.map((ev) => ev.data.path).sort();
   assert.deepEqual(paths, ["meta.inner", "title"]);
-  const byPath = Object.fromEntries(events.map((ev) => [ev.data.path, ev.data.value]));
+  const byPath = Object.fromEntries(
+    fieldEvents.map((ev) => [ev.data.path, ev.data.value])
+  );
   assert.deepEqual(byPath["meta.inner"], 42);
   assert.deepEqual(byPath["title"], "Hello");
 });
@@ -87,6 +126,14 @@ test("emits tracked fields and array items from the full payload", () => {
   const arrayEvents = events.filter(
     (ev): ev is Extract<JsonPathStreamEvent, { type: "array-item" }> =>
       ev.type === "array-item"
+  );
+  const arrayStarts = events.filter(
+    (ev): ev is Extract<JsonPathStreamEvent, { type: "array-start" }> =>
+      ev.type === "array-start"
+  );
+  const arrayEnds = events.filter(
+    (ev): ev is Extract<JsonPathStreamEvent, { type: "array-end" }> =>
+      ev.type === "array-end"
   );
   const fieldEvents = events.filter(
     (ev): ev is Extract<JsonPathStreamEvent, { type: "field" }> =>
@@ -120,6 +167,23 @@ test("emits tracked fields and array items from the full payload", () => {
     assert.deepEqual(JSON.parse(ev.data.raw), ev.data.value);
     assert.equal(ev.data.entityIndex, 0);
   });
+
+  assert.equal(arrayStarts.length, 2);
+  assert.ok(arrayStarts.some((ev) => ev.data.path === "non_empty_array"));
+  assert.ok(arrayStarts.some((ev) => ev.data.path === "empty_array"));
+
+  assert.equal(arrayEnds.length, 2);
+  const nonEmptyEnd = arrayEnds.find(
+    (ev) => ev.data.path === "non_empty_array"
+  );
+  assert.ok(nonEmptyEnd);
+  if (nonEmptyEnd?.type !== "array-end")
+    throw new Error("expected array-end");
+  assert.equal(nonEmptyEnd.data.length, fullPayload.non_empty_array.length);
+  const emptyEnd = arrayEnds.find((ev) => ev.data.path === "empty_array");
+  assert.ok(emptyEnd);
+  if (emptyEnd?.type !== "array-end") throw new Error("expected array-end");
+  assert.equal(emptyEnd.data.length, 0);
 });
 
 test("throws when JSON is incomplete at finalize", () => {

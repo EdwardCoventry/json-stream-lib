@@ -1,12 +1,12 @@
 # json-stream-lib
 
-Incremental JSON streaming helpers for SSE responses and raw text streams (preview `0.0.5`).
+Incremental JSON streaming helpers for SSE responses and raw text streams (preview `0.0.6`).
 
 ## What it does
 Helps you turn streaming AI responses into usable text and JSON as they arrive instead of waiting for a full payload.
 - Merge structured SSE deltas (`response.output_json.delta`, `response.output_text.delta`, `response.content_part.added`, `[DONE]`) into partial + final JSON plus text slices.
 - Parse plain text streams into JSON with partial/completed callbacks and auto-closure support for braces/brackets/booleans/nulls.
-- Emit tracked field/array-item events as raw JSON closes naturally (no forced closure).
+- Emit tracked field/array events (start/item/end) as raw JSON closes naturally (no forced closure).
 - Reuse throttling, retry, watchdog, and DOM debug primitives to plug into browsers or Node.
 
 ## Install
@@ -79,6 +79,11 @@ const emitter = createJsonPathStreamEmitter({
 for (const chunk of textChunks) emitter.push(chunk);
 emitter.finalize();
 ```
+`createJsonPathStreamEmitter` emits:
+- `array-start` when a tracked array opens
+- `array-item` for each fully closed item
+- `array-end` when the tracked array closes
+along with `field` events for tracked fields.
 For manual control, `RawJsonStreamParser` exposes `parse(chunk, isFinal)` and emits `{status: 'PARTIAL' | 'COMPLETED', data, forcedClosures, event?: 'JSON_STARTED'}`. It auto-completes literal prefixes (`tr` → `true`, `fal` → `false`, `nu` → `null`) when they appear at value boundaries and still emits a change when a forced close is later replaced by a real brace/bracket. More in `docs/raw-text-to-json.md`. Empty container emission is enabled by default; disable via `new RawJsonStreamParser({ emitEmptyContainers: false })` or `runRawJsonStream({ emitEmptyContainers: false, ... })`.
 
 ## API entry points
