@@ -46,3 +46,22 @@ Events:
 ## Other helpers
 - `createRawJsonEmitter` gives you a push-based wrapper if you don’t have an async iterator.
 - `createRawTextAccumulator` lets you coalesce deltas into a full string and emit it as it changes.
+
+## Path-based stream events
+`createJsonPathStreamEmitter` emits events when tracked fields or array items close naturally (no forced auto-close). This is useful when you need to stream list items as soon as they are complete.
+```ts
+import { createJsonPathStreamEmitter } from '@edwardcoventry/json-stream-lib/streaming/raw-json';
+
+const events: Array<{ type: string; data: any }> = [];
+const emitter = createJsonPathStreamEmitter({
+  arrays: ['stages', 'ingredients'],
+  fields: ['title', 'nutrition.calories'],
+  onEvent: (ev) => events.push(ev),
+});
+
+for (const chunk of textChunks) emitter.push(chunk);
+emitter.finalize();
+```
+Events:
+- `field` → `{ path, value, raw, entityIndex }`
+- `array-item` → `{ path, index, value, raw, entityIndex }`

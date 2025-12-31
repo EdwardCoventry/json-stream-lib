@@ -5,34 +5,7 @@ import {
   runRawJsonStream,
   type RawJsonStreamEvent,
 } from "../streaming/raw-json/index.js";
-
-const payload = {
-  title: "Valid json but totally meaningless data payload",
-  description:
-    "This payload is structurally valid JSON but the data is just made up nonsense devoid of meaning.",
-  rgb: { red: "#ff0000", green: "#00ff00", blue: "#0000ff" },
-  bw: { black: "#000000", white: "#ffffff" },
-  items_in_json: 16,
-  negative_integer: -17,
-  floating_point: 3.14159,
-  large_number: 1.2e30,
-  small_number: 5.67e-25,
-  empty_array: [],
-  non_empty_array: ["item_one", 102, { nested: "item_3" }],
-  empty_object: {},
-  deeper_object: {
-    level_1: {
-      level_2: {
-        level_3: {
-          key: "deep_value",
-        },
-      },
-    },
-  },
-  is_valid_json: true,
-  is_sensible_data: false,
-  meaning: null,
-};
+import { fullPayload } from "./fixtures/full-payload.js";
 
 type CompleteEvent = Extract<RawJsonStreamEvent, { type: "complete" }>;
 type ValueEvent = Extract<RawJsonStreamEvent, { type: "partial" | "complete" }>;
@@ -123,7 +96,7 @@ test("runRawJsonStream emits expected events for complex payload", async () => {
   const events: RawJsonStreamEvent[] = [];
 
   async function* source() {
-    const json = JSON.stringify(payload);
+    const json = JSON.stringify(fullPayload);
     // chunk intentionally at uneven offsets
     yield json.slice(0, 80);
     yield json.slice(80, 180);
@@ -151,7 +124,7 @@ test("runRawJsonStream emits expected events for complex payload", async () => {
   assert.equal(completes.length, 1, "expected exactly one complete event");
 
   const final = completes[0].data;
-  assert.deepEqual(final.value, payload);
+  assert.deepEqual(final.value, fullPayload);
   assert.equal(final.forcedClosures, 0);
 
   // Sanity check that the items_in_json count matches the number of top-level keys
@@ -166,7 +139,7 @@ test("runRawJsonStream incrementally parses incomplete JSON from single-characte
   const events: RawJsonStreamEvent[] = [];
 
   async function* source() {
-    const json = JSON.stringify(payload);
+    const json = JSON.stringify(fullPayload);
     // Yield one character at a time to stress the incremental parser.
     for (const ch of json) {
       yield ch;
@@ -207,12 +180,12 @@ test("runRawJsonStream incrementally parses incomplete JSON from single-characte
   );
 
   // First useful snapshot: only the title field should be present.
-  assert.deepEqual(snapshots[0], { title: payload.title });
+  assert.deepEqual(snapshots[0], { title: fullPayload.title });
 
   // Second snapshot: title + description, and nothing else yet.
   assert.deepEqual(snapshots[1], {
-    title: payload.title,
-    description: payload.description,
+    title: fullPayload.title,
+    description: fullPayload.description,
   });
   assert.deepEqual(
     Object.keys(snapshots[1]).sort(),
@@ -221,7 +194,7 @@ test("runRawJsonStream incrementally parses incomplete JSON from single-characte
 
   // Final snapshot should be the full payload (comes from the 'complete' event).
   const finalSnapshot = snapshots[snapshots.length - 1];
-  assert.deepEqual(finalSnapshot, payload);
+  assert.deepEqual(finalSnapshot, fullPayload);
 
   // Sanity check that the items_in_json count matches the number of top-level keys
   assert.equal(
@@ -245,9 +218,9 @@ test("runRawJsonStream incrementally parses incomplete JSON from single-characte
     snapshots.some(
       (s) =>
         s.rgb &&
-        s.rgb.red === payload.rgb.red &&
-        s.rgb.green === payload.rgb.green &&
-        s.rgb.blue === payload.rgb.blue
+        s.rgb.red === fullPayload.rgb.red &&
+        s.rgb.green === fullPayload.rgb.green &&
+        s.rgb.blue === fullPayload.rgb.blue
     ),
     "expected full rgb object to appear in some snapshot"
   );
@@ -256,8 +229,8 @@ test("runRawJsonStream incrementally parses incomplete JSON from single-characte
     snapshots.some(
       (s) =>
         s.bw &&
-        s.bw.black === payload.bw.black &&
-        s.bw.white === payload.bw.white
+        s.bw.black === fullPayload.bw.black &&
+        s.bw.white === fullPayload.bw.white
     ),
     "expected full bw object to appear in some snapshot"
   );
@@ -266,11 +239,11 @@ test("runRawJsonStream incrementally parses incomplete JSON from single-characte
     snapshots.some(
       (s) =>
         Array.isArray(s.non_empty_array) &&
-        s.non_empty_array.length === payload.non_empty_array.length &&
+        s.non_empty_array.length === fullPayload.non_empty_array.length &&
         s.non_empty_array.every(
           (item: any, idx: number) =>
             JSON.stringify(item) ===
-            JSON.stringify(payload.non_empty_array[idx])
+            JSON.stringify(fullPayload.non_empty_array[idx])
         )
     ),
     "expected full non_empty_array to appear in some snapshot"
@@ -284,7 +257,7 @@ test("runRawJsonStream incrementally parses incomplete JSON from single-characte
         s.deeper_object.level_1.level_2 &&
         s.deeper_object.level_1.level_2.level_3 &&
         s.deeper_object.level_1.level_2.level_3.key ===
-          payload.deeper_object.level_1.level_2.level_3.key
+          fullPayload.deeper_object.level_1.level_2.level_3.key
     ),
     "expected deeper_object to appear in some snapshot"
   );
@@ -297,7 +270,7 @@ test("runRawJsonStream logs progressive diffs for the complex payload", async ()
   let lastEmittedSnapshot: any = undefined;
 
   async function* source() {
-    const json = JSON.stringify(payload);
+    const json = JSON.stringify(fullPayload);
     for (const ch of json) {
       lastChunkBytes = 1;
       totalBytes += 1;
@@ -337,5 +310,5 @@ test("runRawJsonStream logs progressive diffs for the complex payload", async ()
     (e): e is CompleteEvent => e.type === "complete"
   );
   assert.equal(completes.length, 1, "should complete the document");
-  assert.deepEqual(completes[0].data.value, payload);
+  assert.deepEqual(completes[0].data.value, fullPayload);
 });

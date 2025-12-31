@@ -1,6 +1,6 @@
 {
   "name": "@edwardcoventry/json-stream-lib",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "type": "module",
   "private": false,
   "description": "Incremental JSON stream parser and SSE helpers for AI responses.",
