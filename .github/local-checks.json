@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "tasks": {
+    "check": [
+      {
+        "name": "Build and contracts",
+        "command": ["npm", "test"],
+        "cwd": "."
+      }
+    ],
+    "release-check": [
+      {
+        "name": "npm package validation",
+        "command": ["npm", "pack", "--dry-run"],
+        "cwd": "."
+      }
+    ]
+  }
+}
